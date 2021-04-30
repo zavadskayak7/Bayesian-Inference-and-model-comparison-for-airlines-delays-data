@@ -1,0 +1,370 @@
+---
+title: "Final project SMDS-2-2020"
+author: "Zavadskaya Katsiaryna 1847985"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(R2jags)
+require(mcmcse)
+require(bayesplot)
+require(TeachingDemos)
+require(ggmcmc)
+```
+
+## Flight Delays
+
+The dataset contains information about flight delays for 14 airlines for each of the days of 2015. For the computations simplicity I grouped it in way that it is showing total number of flights performed and number of flights with a delay for all the airline companies during 1st of January 2015.
+
+The original data can be accessed at:
+https://www.kaggle.com/usdot/flight-delays/data?select=flights.csv
+
+
+### 1 - Data
+
+The data is shown in the table below:
+```{r}
+flights <- read.csv("data/flights_summary_delays_2015_01_01_01.csv")
+flights <- as.data.frame(flights)
+flights
+```
+#### 1.1 - Data overview
+
+As we can see from the data table, the airline name is encoded with two letters. The basic summaries about our numerical features can be seen below:
+```{r}
+summary(flights$TOTAL)
+summary(flights$DELAYED.FLIGHTS)
+```
+More in detail, the data available corresponds to 14 different airlines, having a minimum number of flights per day equal to 152 and a maximum of 1559. The delay rates are in the interval of minimum 39 and maximum 771 delayed flights per day.
+
+Following we can see the graphic visualization of the data:
+```{r}
+# Histograms
+par(mfrow=c(2,2))
+hist(main='Number of flights per day', flights$TOTAL, xlab='Number of flights', ylab='Frequency', col='orchid')
+hist(main='Number of delays per day', flights$DELAYED.FLIGHTS, xlab='Number of delays', ylab='Frequency', col='orchid')
+d <- density(flights$DELAYED.FLIGHTS) # the density of the data
+plot(d, main = "Density Delayed Flights", col = "orchid", lwd = 2)
+```
+
+### 2 - Model description
+
+Lets denote total number of flights performed by each airline \(i\) as \(n_i \). The number of delayed flights will be \({r_i}\) which is a binary response variable with 'true' delay probability \({p_i}\). In order to model the outcome I am going to use Binomial distribution. 
+
+<center>
+\(r_i \sim Binomial(p_i,n_i) \)
+</center>
+
+The aim of my analysis is to estimate parameters of the Binomial distribution for each of the airlines.
+
+Additionally, it is assumed that the true delay probabilities are independent for each airline. A standard non-informative prior distribution for the \(p_i\) is following:
+
+<center>
+\(p_i \sim Beta(1.0,1.0)\)
+</center>
+
+The Beta distribution is a continuous distribution that only takes values between 0 to 1.
+And we need a prior for each of the \(p_i\).
+
+In order to make inference in an automatic way, I am writing a model for JAGS.
+
+#### 2.1 - Data preparation for JAGS
+
+Since JAGS is not able to deal with dataframes, I need to transform data into lists.
+
+```{r}
+n <- flights$TOTAL
+r <- flights$DELAYED.FLIGHTS
+N <- nrow(flights)
+flights.jags <- list("r", "n", "N")
+```
+#### 2.2 - JAGS Model
+
+The following code was executed in order to find probabilities of delay for each airline.
+
+
+```{r}
+# Model
+model <- function() {
+  for(i in 1:N){
+    p[i] ~ dbeta(1.0, 1.0) # Prior
+    r[i] ~ dbinom(p[i], n[i]) # Model
+  }
+}
+
+# Starting values
+mod.inits = function(){
+  list("p" = c(0.1, 0.1, 0.1, 0.1,0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1))
+  }
+
+# Run JAGS
+set.seed(123)
+mod.fit <- jags(data = flights.jags,                            
+                model.file = model, inits = mod.inits,          
+                parameters.to.save = 'p',                  
+                n.chains = 3, n.iter = 10000, n.burnin = 1000, n.thin=5)
+```
+
+#### 2.3 - Output and Diagnostic
+
+
+```{r}
+mod.fit
+mod.fit$BUGSoutput$summary
+```
+
+Next I want to understand if I can trust the MCMC results. To do that I want to see if there any evidence that the chains are stationary, i.e. if the simulated parameters values are moving in a consistent direction.
+
+To get a visual idea about what is happening in a chain, I extract it from the model output.
+
+```{r}
+chainArray <- mod.fit$BUGSoutput$sims.array
+```
+
+Next I look at the traceplots in order to inspect sampling behavior and assess mixing across chains and convergence. Lets first look at all the traceplots and then have a closer view of one of them:
+
+```{r, fig.width=16, fig.height=8}
+mcmc_trace(chainArray)
+mcmc_trace(chainArray, pars="p[2]")
+```
+
+While examining the following traceplots I see that chains are visualized just on top of each other, which means that all 3 chains converged towards the same value. I conclude that there can not be seen any evidence that the chain has not achieved stationarity.
+
+The next diagnostic step is to look at the plots of estimated density of the parameters and of the deviance, where density plots are just smoothed histograms of the samples.
+
+```{r, fig.width=16, fig.height=8}
+mcmc_dens(chainArray)
+mcmc_dens_overlay(chainArray)
+```
+
+The third way is to check autocorrelation plots. These plots are specific for each of the chains. I expect to see low autocorrelation, since it indicates convergence. And as it can be seen on the plot, the autocorrelation function drops to 0 pretty fast, after only a couple of lags.
+
+```{r, fig.width=16, fig.height=8}
+bayesplot::mcmc_acf(chainArray)
+```
+
+### 3 - Inferential findings
+
+Lets first join the deviance and p[i] for all 3 chains:
+```{r}
+chainMat <- mod.fit$BUGSoutput$sims.matrix
+```
+
+Now the point estimates can be seen:
+```{r}
+p.hat.jags <- colMeans(chainMat)
+p.hat.jags
+```
+
+When it comes to interval estimation, first lets see equal tail intervals:
+```{r}
+cred <- 0.95
+p.ET.jags <- apply(chainMat, 2, quantile, prob=c((1-cred)/2, 1-(1-cred)/2))
+p.ET.jags
+```
+
+And also HPD intervals:
+```{r}
+p.HPD.jags <- coda::HPDinterval(as.mcmc(chainMat))
+p.HPD.jags
+```
+
+
+### 4 Alternative model
+
+In the first model it was assumed that the true delay probabilities are independent for each airline. However, a more realistic model for flights delay is that the delay rates across airline companies are similar in some way.
+
+<center>
+\(r_i \sim Binomial(p_i,n_i) \)
+</center>
+
+<center>
+\(\log(p_i/(1-p_i) \sim Normal(\mu,\tau^{2}) \)
+</center>
+
+In this model we assume that the logit of each airline's rate is related to each other.
+Standard priors are given by:
+
+<center>
+\(\mu \sim Normal(0, 1*10^{-6})\)
+</center>
+
+<center>
+\(1/\tau^{2} \sim Gamma(0.001, 0.001) \)
+</center>
+
+Standard non-informative priors are specified for the population mean (logit) probability of delay - \( \mu\) , and precision - \( \tau\).
+
+#### 4.1 - Data preparation for JAGS
+
+Since JAGS is not able to deal with dataframes, I need to transform data into lists.
+
+```{r}
+n <- flights$TOTAL
+r <- flights$DELAYED.FLIGHTS
+N <- nrow(flights)
+flights.jags2 <- list("r", "n", "N")
+```
+#### 4.2 - JAGS Model
+
+The following code was executed in order to find probabilities of delay for each airline.
+
+```{r}
+# Model
+model2 <- function() {
+  for(i in 1:N){
+    r[i] ~ dbinom(p[i], n[i]) #Model
+    b[i] ~ dnorm(mu,tau)
+    logit(p[i]) <- b[i]
+  }
+  mu ~ dnorm(0.0, 1.0E-6) #Priors
+  tau ~ dgamma(0.001, 0.001)
+  
+  sigma <- 1 / sqrt(tau)
+  pop.mean <- exp(mu) / (1 + exp(mu))
+}
+
+# Starting values
+mod.inits2 = function(){
+  list(b = c(0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1),
+       tau = 1,
+       mu = 0)
+}
+
+# Run JAGS
+set.seed(123)
+mod.fit2 <- jags(data = flights.jags2,                            
+                model.file = model2, inits = mod.inits2,          
+                parameters.to.save = c("p","sigma","mu","pop.mean"),                  
+                n.chains = 3, n.iter = 10000, n.burnin = 1000, n.thin=5)
+```
+#### 4.3 - Output and Diagnostic
+
+
+```{r}
+mod.fit2
+mod.fit2$BUGSoutput$summary
+```
+
+Next I want to understand if I can trust the MCMC results. To do that I repeat the process exactly as for model 1.
+
+```{r}
+chainArray2 <- mod.fit2$BUGSoutput$sims.array
+```
+
+Traceplots:
+
+```{r, fig.width=16, fig.height=8}
+mcmc_trace(chainArray2)
+mcmc_trace(chainArray2, pars="p[3]")
+```
+
+While examining the following traceplots I see that chains are visualized just on top of each other, which means that all 3 chains converged towards the same value. I conclude that there can not be seen any evidence that the chain has not achieved stationarity.
+
+Density:
+
+```{r, fig.width=16, fig.height=8}
+mcmc_dens(chainArray2)
+mcmc_dens_overlay(chainArray2)
+```
+
+Autocorrelation plots:
+
+```{r, fig.width=16, fig.height=8}
+bayesplot::mcmc_acf(chainArray)
+```
+
+### 5 - Inferential findings of the model 2
+
+```{r}
+chainMat2 <- mod.fit2$BUGSoutput$sims.matrix
+```
+
+Now the point estimates can be seen:
+```{r}
+p.hat.jags2 <- colMeans(chainMat2)
+p.hat.jags2
+```
+
+Equal tail intervals:
+```{r}
+cred <- 0.95
+p.ET.jags2 <- apply(chainMat2, 2, quantile, prob=c((1-cred)/2, 1-(1-cred)/2))
+p.ET.jags2
+```
+
+HPD intervals:
+```{r}
+p.HPD.jags2 <- coda::HPDinterval(as.mcmc(chainMat2))
+p.HPD.jags2
+```
+### 5 - Comparison of the models
+
+In order to compare two different models I need to use term DIC - Deviance Information Criterion. DIC is a Bayesian method for model comparison and a measure for the prediction error of a model. The lower DIC value the better the model fits the data. 
+
+The deviance D, given a parameter value $\theta$ returns error using the log-likelihood function:
+$D(\theta) = -2  \text{log} * L(data|\theta)$
+
+Once the posterior means are computed, I can measure their deviance as:
+
+$D(\hat{\theta}) = -2 \text{log} * L(data|\hat{\theta})$
+Taking all steps i in the different MCMCs, we can from this compute an average - posterior mean of the deviance as follows:
+
+$\hat{D} = \frac{1}{M}\sum^{M}_{i=1}D (\theta_{i})$
+
+Now it is possible to compute the effective number of parameters:
+
+$p_{D} = \hat{D} - D(\hat{\theta})$
+
+The DIC is then computed:
+
+$DIC = D(\hat{\theta})- 2 p_{D}$
+
+```{r}
+paste("Model 1 DIC:",round(mod.fit$BUGSoutput$DIC,digits = 3),'         ',"Model 2 DIC",round(mod.fit2$BUGSoutput$DIC,digits = 3))
+```
+Looking at the DIC values, it is obvious that the difference is not significant. And in fact the difference is equal to:
+
+```{r}
+paste("DIC Difference:", round(abs(mod.fit$BUGSoutput$DIC - mod.fit2$BUGSoutput$DIC),digits = 3))
+```
+The conclusion I can draw is that it is not possible to say exactly which model out of two is better.
+
+### 6 - Comparison with frequentist inference
+
+Instead of using MCMC approximation for estimation of each of the probabilities, it is also possible to estimate CI of their mean and standard deviation using Bootstarp.
+
+Firstly, I compute probabilities by dividing column 'DELAYED.FLIGHTS' by column 'TOTAL':
+```{r}
+flights$PROB =  flights$DELAYED.FLIGHTS / flights$TOTAL
+flights
+```
+
+At first number of sampling was picked. After that in the loop list of estimated probabilities that we calculated below was resampled with replacement.
+Mean and Standard deviation of each sample were saved. Using percentiles we can construct our Confidence Intervals.
+
+```{r}
+PROB_Matrix <- as.matrix(flights$PROB)
+n = nrow(flights)
+B <- 1000
+
+our_out_put <- rep(NA,B) # empty vector
+our_out_sd <- rep(NA,B)
+
+for (b in 1:B){
+  new_sample <- PROB_Matrix[sample(n,n,replace=TRUE),]
+  our_out_put[b] <- mean(new_sample)
+  our_out_sd[b] <- sqrt(var(new_sample))
+}
+
+paste("Mean Lower Bound:", quantile(our_out_put, c(0.025)),"Mean Upper Bound:",quantile(our_out_put, c(0.975)))
+paste("SD Lower Bound:", quantile(our_out_sd, c(0.025)),"SD Upper Bound:",quantile(our_out_sd, c(0.975)))
+```
+
+
+
+
+
